@@ -1,0 +1,12 @@
+.venv
+.git
+__pycache__
+*.pyc
+.ipynb
+.ipynb_checkpoints
+data
+notebooks
+reports
+.vscode
+wheelhouse
+wheelhouse_backup

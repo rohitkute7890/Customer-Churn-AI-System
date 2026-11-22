@@ -2,7 +2,9 @@
 import streamlit as st
 import requests
 
-API_URL = "http://127.0.0.1:8000/predict"
+import os
+
+API_URL = os.getenv("API_URL", "http://127.0.0.1:8000/predict")
 
 st.set_page_config(
     page_title="Customer Churn AI",
