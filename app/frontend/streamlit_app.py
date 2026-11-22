@@ -4,7 +4,7 @@ import requests
 
 import os
 
-API_URL = os.getenv("API_URL", "http://127.0.0.1:8000/predict")
+API_URL = os.getenv("API_URL", "https://customer-churn-ai-system.onrender.com/predict")
 
 st.set_page_config(
     page_title="Customer Churn AI",
