@@ -11,3 +11,8 @@ uvicorn
 streamlit
 pydantic
 python-multipart
+sqlalchemy
+psycopg[binary]
+python-jose[cryptography]
+bcrypt
+python-dotenv

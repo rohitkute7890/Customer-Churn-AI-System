@@ -12,3 +12,8 @@ streamlit
 pydantic
 python-multipart
 requests
+sqlalchemy
+psycopg[binary]
+python-jose[cryptography]
+bcrypt
+python-dotenv
