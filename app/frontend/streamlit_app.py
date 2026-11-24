@@ -3,6 +3,7 @@ import streamlit as st
 import requests
 
 import os
+import time
 
 API_URL = os.getenv("API_URL", "https://customer-churn-ai-system.onrender.com/predict")
 
@@ -212,11 +213,29 @@ if submitted:
 
     try:
 
-        response = requests.post(
-            API_URL,
-            json=customer_data,
-            timeout=10
-        )
+        # Retry temporary Render cold-start errors and connection timeouts.
+        response = None
+        for attempt in range(3):
+            try:
+                response = requests.post(
+                    API_URL,
+                    json=customer_data,
+                    timeout=90
+                )
+
+                # Retry only temporary gateway/service errors.
+                if response.status_code not in (502, 503, 504):
+                    break
+
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+                if attempt == 2:
+                    raise
+
+            if attempt < 2:
+                st.warning(
+                    f"Backend is waking up. Retrying ({attempt + 1}/2)..."
+                )
+                time.sleep(10)
 
         if response.status_code == 200:
 
@@ -367,10 +386,16 @@ if submitted:
                     "No SHAP explanation available for this prediction."
                 )
 
+        elif response.status_code in (502, 503, 504):
+
+            st.error(
+                "The backend is still waking up. Please wait a little and try again."
+            )
+
         else:
 
             st.error(
-                f"API Error ({response.status_code}): {response.text}"
+                f"Prediction failed (HTTP {response.status_code}). Please try again."
             )
 
     except requests.exceptions.ConnectionError:
