@@ -1,8 +1,9 @@
 import os
 import re
+import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Literal
 
 import bcrypt
 import joblib
@@ -10,13 +11,22 @@ import numpy as np
 import pandas as pd
 import shap
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from sqlalchemy import DateTime, ForeignKey, Integer, String, create_engine, desc
+from sqlalchemy.exc import SQLAlchemyError
+from starlette.responses import JSONResponse
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
+# Logging configuration
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+)
+
+logger = logging.getLogger("customer_churn_api")
 
 # Load .env from project root. On Render, set these as environment variables.
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -74,6 +84,30 @@ app = FastAPI(
     description="AI-powered telecom customer churn prediction, authentication and retention recommendations",
     version="2.0",
 )
+
+MODEL_VERSION = "churn-model-v1"
+MAX_REQUEST_BODY_BYTES = 16 * 1024  # 16 KB; the prediction schema is small and fixed.
+
+
+@app.middleware("http")
+async def enforce_request_size_limit(request: Request, call_next):
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            body_size = int(content_length)
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={"detail": "Invalid Content-Length header"},
+            )
+
+        if body_size < 0 or body_size > MAX_REQUEST_BODY_BYTES:
+            return JSONResponse(
+                status_code=413,
+                content={"detail": "Request body is too large"},
+            )
+
+    return await call_next(request)
 
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 if not JWT_SECRET_KEY:
@@ -141,25 +175,39 @@ class LoginRequest(BaseModel):
 
 
 class CustomerData(BaseModel):
-    gender: str
-    SeniorCitizen: int
-    Partner: str
-    Dependents: str
-    tenure: int
-    PhoneService: str
-    MultipleLines: str
-    InternetService: str
-    OnlineSecurity: str
-    OnlineBackup: str
-    DeviceProtection: str
-    TechSupport: str
-    StreamingTV: str
-    StreamingMovies: str
-    Contract: str
-    PaperlessBilling: str
-    PaymentMethod: str
-    MonthlyCharges: float
-    TotalCharges: float
+    model_config = ConfigDict(
+        extra="forbid",
+        str_strip_whitespace=True,
+    )
+
+    gender: Literal["Female", "Male"]
+    SeniorCitizen: int = Field(strict=True, ge=0, le=1)
+    Partner: Literal["Yes", "No"]
+    Dependents: Literal["Yes", "No"]
+    tenure: int = Field(strict=True, ge=0, le=72)
+
+    PhoneService: Literal["Yes", "No"]
+    MultipleLines: Literal["Yes", "No", "No phone service"]
+    InternetService: Literal["DSL", "Fiber optic", "No"]
+
+    OnlineSecurity: Literal["Yes", "No", "No internet service"]
+    OnlineBackup: Literal["Yes", "No", "No internet service"]
+    DeviceProtection: Literal["Yes", "No", "No internet service"]
+    TechSupport: Literal["Yes", "No", "No internet service"]
+    StreamingTV: Literal["Yes", "No", "No internet service"]
+    StreamingMovies: Literal["Yes", "No", "No internet service"]
+
+    Contract: Literal["Month-to-month", "One year", "Two year"]
+    PaperlessBilling: Literal["Yes", "No"]
+    PaymentMethod: Literal[
+        "Electronic check",
+        "Mailed check",
+        "Bank transfer (automatic)",
+        "Credit card (automatic)",
+    ]
+
+    MonthlyCharges: float = Field(strict=True, ge=0, le=120, allow_inf_nan=False)
+    TotalCharges: float = Field(strict=True, ge=0, allow_inf_nan=False)
 
 
 # =========================
@@ -241,7 +289,26 @@ def health_check():
         "database_configured": True,
     }
 
+@app.get("/ready")
+def readiness_check():
+    if model is None or not hasattr(model, "predict_proba"):
+        raise HTTPException(
+            status_code=503,
+            detail="Model is not ready"
+        )
 
+    if explainer is None:
+        raise HTTPException(
+            status_code=503,
+            detail="SHAP explainer is not ready"
+        )
+
+    return {
+        "status": "ready",
+        "model_loaded": True,
+        "shap_enabled": True,
+        "model_version": MODEL_VERSION
+    }
 @app.post("/auth/signup")
 def signup(payload: SignupRequest, db: Session = Depends(get_db)):
     email = payload.email.strip().lower()
@@ -319,8 +386,22 @@ def predict_churn(
     db: Session = Depends(get_db),
 ):
     customer_df = pd.DataFrame([customer.model_dump()])
-    probability = float(model.predict_proba(customer_df)[0][1])
-    prediction = int(probability >= threshold)
+
+    # Keep inference failures separate from database persistence failures.
+    try:
+        probability = float(model.predict_proba(customer_df)[0][1])
+        prediction = int(probability >= threshold)
+        top_churn_factors = explain_churn(customer_df)
+    except Exception:
+        logger.exception(
+            "Prediction inference failed | user_id=%s | model_version=%s",
+            user.id,
+            MODEL_VERSION,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="The prediction could not be completed.",
+        )
 
     if probability >= 0.60:
         risk_level = "High"
@@ -335,8 +416,9 @@ def predict_churn(
         "risk_level": risk_level,
         "churn_probability": round(probability, 4),
         "threshold": round(threshold, 4),
+        "model_version": MODEL_VERSION,
         "recommendations": generate_recommendations(customer, probability),
-        "top_churn_factors": explain_churn(customer_df),
+        "top_churn_factors": top_churn_factors,
     }
 
     history_record = PredictionHistory(
@@ -344,7 +426,27 @@ def predict_churn(
         customer_data=customer.model_dump(),
         result=result,
     )
-    db.add(history_record)
-    db.commit()
+
+    try:
+        db.add(history_record)
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        logger.exception(
+            "Failed to save prediction history | user_id=%s | model_version=%s",
+            user.id,
+            MODEL_VERSION,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Prediction completed but history could not be saved.",
+        )
+
+    logger.info(
+        "Prediction completed | user_id=%s | model_version=%s | risk_level=%s",
+        user.id,
+        MODEL_VERSION,
+        risk_level,
+    )
 
     return result

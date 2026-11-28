@@ -379,7 +379,7 @@ def request_prediction(customer_data):
     for attempt in range(3):
         try:
             response = requests.post(
-                API_URL,
+                f"{API_BASE_URL}/predict",
                 json=customer_data,
                 timeout=90,
             )
@@ -696,3 +696,4 @@ elif page == "AI Insights":
         st.divider(); st.subheader("Recommended retention actions")
         for item in recommendations: st.info(f"📌 {item}")
         st.caption("Insights are based on the model response and are not a guarantee of future customer behavior.")
+

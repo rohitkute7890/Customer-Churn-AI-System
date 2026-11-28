@@ -1,12 +1,22 @@
+@"
 .venv
+venv
 .git
+.gitignore
+.env
+.env.*
+!.env.example
 __pycache__
 *.pyc
+.pytest_cache
 .ipynb
 .ipynb_checkpoints
 data
 notebooks
 reports
+tests
 .vscode
 wheelhouse
 wheelhouse_backup
+.streamlit/secrets.toml
+"@ | Set-Content .\.dockerignore
